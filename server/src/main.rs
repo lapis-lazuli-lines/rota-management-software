@@ -1,55 +1,54 @@
-mod config;
-mod database;
-mod error;
-mod middleware;
+mod auth;
 mod models;
-mod routes;
-#[cfg(test)]
-mod tests;
 
-use axum::Extension;
-use dotenv::dotenv;
+use axum::{
+    routing::{get, post},
+    http::StatusCode,
+    response::IntoResponse,
+    Router,
+};
+use std::net::SocketAddr;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
 async fn main() {
-    // Load .env file if it exists
-    dotenv().ok();
-    
-    // Load configuration
-    let config = config::Config::from_env();
-
-    // Initialize tracing
+    // Initialize tracing for logging
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| config.log_level.clone()),
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
         ))
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    // Initialize database connection
-    let db_pool = match database::create_db_pool().await {
-        Ok(pool) => {
-            tracing::info!("Connected to database");
-            pool
-        },
-        Err(e) => {
-            tracing::error!("Failed to connect to database: {:?}", e);
-            std::process::exit(1);
-        }
-    };
-
-    // Build our application router
-    let app = routes::app_routes()
-        .layer(Extension(db_pool))
-        .layer(axum::middleware::from_fn(middleware::request_id::request_id_middleware))
+    // Build our application with routes
+    let app = Router::new()
+        .route("/", get(health_check))
+        // Public authentication routes
+        .route("/api/auth/register", post(auth::register))
+        .route("/api/auth/login", post(auth::login))
+        .route("/api/auth/refresh", post(auth::refresh_token))
+        .route("/api/auth/logout", post(auth::logout))
+        // Protected routes
+        .route("/api/protected", get(auth::protected))
+        // Add tracing middleware
         .layer(TraceLayer::new_for_http());
 
-    // Run the server
-    let addr = config.socket_addr();
-    tracing::info!("listening on {}", addr);
+    // Define the address to run the server on
+    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    tracing::info!("Server listening on {}", addr);
+
+    // Start the server
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    tracing::info!("server started successfully");
-    axum::serve(listener, app).await.unwrap();
+    tracing::info!("Listening on {}", addr);
+    axum::Server::from_tcp(listener.into_std().unwrap())
+        .unwrap()
+        .serve(app.into_make_service())
+        .await
+        .unwrap();
+}
+
+// Health check endpoint
+async fn health_check() -> impl IntoResponse {
+    StatusCode::OK
 }
